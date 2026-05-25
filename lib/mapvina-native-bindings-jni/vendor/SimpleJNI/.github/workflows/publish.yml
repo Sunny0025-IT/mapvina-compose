@@ -1,0 +1,51 @@
+name: Publish
+
+on: workflow_dispatch
+
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get Release Name
+        id: get_release 
+        shell: python
+        run: |
+          import os
+          #ref = os.environ['GITHUB_REF']
+          #name = ref[ref.rfind('/') + 1:]
+          with open('VERSION', 'r') as verFile:
+            name = verFile.read().strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'w') as env:
+            print('name=' + name, file=env)
+
+      - name: Bundle Code
+        shell: bash
+        run: |
+          cd jnigen
+          ./gradlew -PbuildDir=build bundleCpp bundleJava
+
+      - name: Publish to Maven Central
+        env:
+          GPG_KEY: ${{ secrets.GPG_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GPG_KEY_PASSWD: ${{ secrets.GPG_KEY_PASSWD }}
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        shell: bash
+        run: |
+          .tools/publish
+
+      - name: Make release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: false
+          name: ${{ steps.get_release.outputs.name }}
+          body: ...edit me...
+          files: |
+            jnigen/build/SimpleJNI-${{ steps.get_release.outputs.name }}-cpp-only.zip
+            jnigen/build/SimpleJNI-${{ steps.get_release.outputs.name }}-jnigen.zip

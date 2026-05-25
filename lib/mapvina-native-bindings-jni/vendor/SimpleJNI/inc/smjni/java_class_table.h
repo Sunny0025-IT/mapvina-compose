@@ -1,0 +1,102 @@
+/*
+ Copyright 2014 Smartsheet Inc.
+ Copyright 2019 SmJNI Contributors
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+*/
+
+#ifndef HEADER_JAVA_CLASS_TABLE_H_INCLUDED
+#define HEADER_JAVA_CLASS_TABLE_H_INCLUDED
+
+#include <smjni/config.h>
+
+namespace smjni
+{
+    namespace internal
+    {
+        template <typename Func, typename... T>
+        void tuple_for_each(std::tuple<T...> &ts, Func func) 
+        {
+            int unused[] = {(func(std::get<T>(ts)),0)...};
+            (void)unused;
+        }
+        
+        template<typename X, typename... T>
+        decltype(auto) dependent_forward(X && val)
+            { return std::forward<X>(val); }
+
+        class class_registrator
+        {
+        public:
+            class_registrator(JNIEnv * env):
+                m_env(env)
+            {}
+
+            template<typename X>
+            void operator()(const X & cls) const
+            {
+                if constexpr (can_register<X>)
+                {
+                    cls.register_methods(m_env);
+                }
+            }
+
+        private:
+            template <typename T> static std::true_type can_register_helper( decltype(&T::register_methods) );
+            template <typename T> static std::false_type can_register_helper(...);
+            
+            template<typename T>
+            static constexpr bool can_register = decltype(can_register_helper<T>(nullptr))::value;
+
+            JNIEnv * const m_env;
+        };
+    }
+
+    template<typename... Classes>
+    class java_class_table
+    {
+    public:
+        static void init(JNIEnv * env)
+        {
+            s_instance = new java_class_table(env);
+        }
+        static void term()
+        {
+            delete s_instance;
+        }
+
+        template<typename T>
+        static const T & get()
+        {
+            return std::get<T>(s_instance->m_table);
+        }
+
+        java_class_table(const java_class_table &) = delete;
+        java_class_table & operator=(const java_class_table &) = delete;
+    private:
+        java_class_table(JNIEnv * env):
+            m_table(internal::dependent_forward<Classes>(env)...)
+        {
+            internal::tuple_for_each(m_table, internal::class_registrator(env));
+        }
+    private:
+        std::tuple<Classes...> m_table;
+        
+        static java_class_table * s_instance;
+    };
+    
+    template<typename... Classes>
+    java_class_table<Classes...> * java_class_table<Classes...>::s_instance = nullptr;
+}
+
+#endif

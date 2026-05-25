@@ -1,0 +1,119 @@
+/*
+ Copyright 2021 SimpleJNI Contributors
+
+ Incorporates work covered by the following copyright
+ Copyright 2019 SmJNI Contributors
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+*/
+
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+}
+
+allprojects {
+    repositories {
+        mavenLocal()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'java'
+
+//JniGen settings
+def jniGenProps = new Object() {
+    def generatedPath = "src/cpp/generated"
+    def outputListName = "outputs.txt"
+    def additionalClasses = ["java.lang.AssertionError"]
+}
+
+
+dependencies {
+    implementation 'io.github.gershnik:smjni-jnigen-annotations:SNAPSHOT'
+    implementation 'org.junit.jupiter:junit-jupiter-api:5.10.3'
+    annotationProcessor("io.github.gershnik:smjni-jnigen-processor:SNAPSHOT")
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs = [
+            "-Asmjni.jnigen.dest.path=" + file(jniGenProps.generatedPath).path,
+            "-Asmjni.jnigen.output.list.name=" + jniGenProps.outputListName,
+            "-Asmjni.jnigen.expose.extra=" + jniGenProps.additionalClasses.join(";").toString()
+    ]
+    outputs.file("$jniGenProps.generatedPath/$jniGenProps.outputListName")
+}
+
+sourceSets {
+    main.java.srcDirs = ['src/java']
+}
+
+tasks.register('cleanJNIHeaders', Delete) {
+    delete file("${jniGenProps.generatedPath}")
+}
+clean.dependsOn "cleanJNIHeaders"
+
+
+tasks.register('copyRuntimeLibs', Copy) {
+    into(project.layout.buildDirectory.dir("libs").get())
+    from(configurations.runtimeClasspath)
+}
+
+jar {
+    dependsOn("copyRuntimeLibs")
+    manifest {
+        attributes 'Implementation-Title': 'SimpleJNI Tests',
+                   'Implementation-Version': project.version,
+                   'Main-Class': 'smjni.tests.TestSimpleJNI',
+                   'Class-Path': configurations.runtimeClasspath.collect { "libs/"+ it.getName() }.join(' ')
+    }
+    
+    setArchiveFileName("smjnitests.jar")
+    setDestinationDirectory(rootProject.layout.buildDirectory.get())
+}
+
+if (project.hasProperty('android.sdk')) {
+
+    def ANDROID_SDK = project.property('android.sdk')
+    def ANDROID_BUILD_TOOLS_VER = "34.0.0"
+    def ANDROID_VER = "34"
+
+    def d8 = "${ANDROID_SDK}/build-tools/${ANDROID_BUILD_TOOLS_VER}/d8"
+    def android_jar = "${ANDROID_SDK}/platforms/android-${ANDROID_VER}/android.jar"
+
+    tasks.register('dex') {
+        dependsOn("jar")
+        group('build')
+
+        inputs.files([jar.archiveFile] + configurations.runtimeClasspath.files)
+
+        outputs.file(layout.buildDirectory.file(jar.archiveFileName.get().dropRight(4) + ".dex"))
+
+        doLast {
+            exec {
+                workingDir layout.buildDirectory.get()
+                executable d8
+                args += ['--debug', '--lib', android_jar]
+                args += inputs.files.collect { it.path }
+            }
+
+
+            ant.move file: layout.buildDirectory.file("classes.dex").get(),
+                     tofile: outputs.files[0]
+        }
+    }
+    assemble.dependsOn 'dex'
+
+}

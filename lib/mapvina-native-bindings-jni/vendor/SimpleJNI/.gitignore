@@ -1,0 +1,11 @@
+.DS_Store
+
+.vscode/
+.devcontainer/
+.idea/
+.gradle/
+build/
+
+*.iml
+
+.publishrc

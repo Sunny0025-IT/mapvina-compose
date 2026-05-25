@@ -1,0 +1,161 @@
+name: android-release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  android-create-release:
+    runs-on: ubuntu-24.04
+    outputs:
+      version_tag: ${{ steps.prepare_release.outputs.version_tag }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    defaults:
+      run:
+        working-directory: platform/android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate and set version
+        working-directory: .
+        run: .github/scripts/validate-version.sh platform/android/VERSION
+
+      - name: npm install
+        run: npm install --ignore-scripts
+
+      # create github release
+      - name: Prepare release
+        id: prepare_release
+        run: |
+          RELEASE_NOTES_PATH="${PWD}/release_notes.txt"
+          node scripts/release-notes.mjs ${{ env.version }} > "${RELEASE_NOTES_PATH}"
+          echo release_notes="${RELEASE_NOTES_PATH}" >> "$GITHUB_OUTPUT"
+          echo version_tag=android-v${{ env.version }} >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Check if version is pre-release
+        id: check_version
+        run: |
+          version="${{ env.version }}"
+          if [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Valid semver: $version"
+            echo "prerelease=false" >> "$GITHUB_ENV"
+          else
+            echo "Invalid semver: $version"
+            echo "prerelease=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create tag if it does not exist
+        working-directory: .
+        run: .github/scripts/ensure-tag.sh android-v${{ env.version }} ${{ github.sha }}
+
+      - name: Create release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.prepare_release.outputs.version_tag }}
+          release_name: ${{steps.prepare_release.outputs.version_tag }}
+          body_path: ${{ steps.prepare_release.outputs.release_notes }}
+          draft: false
+          prerelease: ${{ env.prerelease }}
+
+  android-build-and-upload-release:
+    needs: android-create-release
+    runs-on: MapVina_Native_Ubuntu_24_04_x84_16_core
+    defaults:
+      run:
+        working-directory: platform/android
+    env:
+      JOBS: 8
+      IS_LOCAL_DEVELOPMENT: false
+    strategy:
+      matrix:
+        RENDERER:
+          - vulkan
+          - opengl
+        BUILDTYPE:
+          - Release
+          - Debug
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: npm install
+        run: npm install --ignore-scripts
+
+      - name: Android nitpick
+        run: make run-android-nitpick
+
+      - name: Build package
+        run: RENDERER=${{ matrix.RENDERER }} BUILDTYPE=${{ matrix.BUILDTYPE }} make apackage
+
+      - name: Save buildtype to GITHUB_ENV
+        run: |
+          buildtype=${{ matrix.BUILDTYPE }}
+          # lowercase
+          echo buildtype=${buildtype,,} > "$GITHUB_ENV"
+
+      - name: Upload aar (${{ matrix.RENDERER }}, ${{ matrix.BUILDTYPE }})
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.android-create-release.outputs.upload_url }}
+          asset_path: platform/android/MapVinaAndroid/build/outputs/aar/MapVinaAndroid-${{ matrix.RENDERER }}-${{ env.buildtype }}.aar
+          asset_name: MapVinaAndroid-${{ matrix.RENDERER }}-${{ env.buildtype }}-${{ needs.android-create-release.outputs.version_tag }}.aar
+          asset_content_type: application/zip
+
+      - name: Upload debug symbols (${{ matrix.RENDERER }}, ${{ matrix.BUILDTYPE }})
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.android-create-release.outputs.upload_url }}
+          asset_path: platform/android/build/debug-symbols-${{ matrix.RENDERER }}-${{ env.buildtype }}.tar.gz
+          asset_name: debug-symbols-mapvina-android-${{ matrix.RENDERER }}-${{ env.buildtype }}-${{ needs.android-create-release.outputs.version_tag }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Prepare MavenCentral release
+        env:
+          GPG_KEY_CONTENTS: ${{ secrets.GPG_KEY_CONTENTS }}
+        run: |
+          echo "${GPG_KEY_CONTENTS}" | base64 -d > signing-key.gpg
+        shell: bash
+
+      - name: Publish to MavenCentral
+        run: |
+          renderer=${{ matrix.RENDERER }}
+          if [ "$renderer" = "opengl" ]; then
+            ./gradlew :MapVinaAndroid:publishOpengl${{ env.buildtype }}PublicationToSonatypeRepository closeAndReleaseSonatypeStagingRepository
+            ./gradlew :MapVinaAndroid:publishDefault${{ env.buildtype }}PublicationToSonatypeRepository closeAndReleaseSonatypeStagingRepository
+          else
+            ./gradlew :MapVinaAndroid:publishVulkan${{ env.buildtype }}PublicationToSonatypeRepository closeAndReleaseSonatypeStagingRepository
+          fi
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY_ID: ${{ secrets.SIGNING_KEY_ID }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+          SONATYPE_STAGING_PROFILE_ID: ${{ secrets.SONATYPE_STAGING_PROFILE_ID }}
+
+      - run: npm install
+        working-directory: .
+
+      - name: Write release notifications
+        if: github.repository_owner == 'mapvina'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .github/scripts/notify-release-on-prs.ts --tag ${{ needs.android-create-release.outputs.version_tag }}
+        working-directory: .
